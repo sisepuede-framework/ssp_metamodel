@@ -3,4 +3,3 @@ notebook
 seaborn
 matplotlib
 scikit-learn
-ydata-profiling
