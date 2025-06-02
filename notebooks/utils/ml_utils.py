@@ -2,8 +2,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import shap
-
-from sklearn.model_selection import train_test_split, RandomizedSearchCV, TimeSeriesSplit
+import xgboost as xgb
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, KFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.ensemble import RandomForestRegressor
@@ -55,10 +55,10 @@ class RFEmissionsPredictionPipeline:
             'max_features': ['sqrt', 'log2', 0.3, 0.5]
         }
         rf = RandomForestRegressor(random_state=self.random_state)
-        tscv = TimeSeriesSplit(n_splits=cv_splits)
+        kf = KFold(n_splits=cv_splits, shuffle=True, random_state=self.random_state)
         search = RandomizedSearchCV(
             rf, param_dist, n_iter=n_iter,
-            scoring='neg_mean_absolute_error', cv=tscv,
+            scoring='neg_mean_absolute_error', cv=kf,
             random_state=self.random_state, n_jobs=-1, verbose=1
         )
         search.fit(self.X_train, np.log1p(self.y_train))
@@ -117,9 +117,10 @@ class RFEmissionsPredictionPipeline:
         if self.pipeline is None:
             raise ValueError("Model not trained.")
         scoring = {'MAE': 'neg_mean_absolute_error', 'R2': 'r2', 'RMSE': 'neg_root_mean_squared_error'}
+        kf = KFold(n_splits=cv_splits, shuffle=True, random_state=self.random_state)
         results = cross_validate(
             self.pipeline, self.X_train, np.log1p(self.y_train) if self._log_transform else self.y_train,
-            cv=TimeSeriesSplit(n_splits=cv_splits), scoring=scoring, n_jobs=-1, return_train_score=False
+            cv=kf, scoring=scoring, n_jobs=-1, return_train_score=False
         )
         print("\nCross-Validation Results:")
         for metric, scores in results.items():
@@ -149,12 +150,9 @@ class RFEmissionsPredictionPipeline:
         self.plot_feature_importances()
 
 
-class BoostingEmissionsPredictionPipeline:
-    def __init__(self,
-                 df: pd.DataFrame,
-                 target: str = 'total_emissions_last_five_years',
-                 test_size: float = 0.2,
-                 random_state: int = 42):
+
+class GBEmissionsPredictionPipeline:
+    def __init__(self, df: pd.DataFrame, target: str = 'total_emissions_last_five_years', test_size: float = 0.2, random_state: int = 42):
         self.df = df
         self.target = target
         self.test_size = test_size
@@ -170,97 +168,48 @@ class BoostingEmissionsPredictionPipeline:
         self._log_transform = False
 
     def preprocess(self):
-        """Split df into train/test X and y."""
         X = self.df.drop(columns=[self.target])
         y = self.df[self.target]
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            X, y,
-            test_size=self.test_size,
-            random_state=self.random_state
+            X, y, test_size=self.test_size, random_state=self.random_state
         )
-        print("Train/test split done!")
 
-    def tune_hyperparameters(self,
-                              n_iter: int = 30,
-                              cv_splits: int = 5):
-        """
-        Randomized search over GradientBoosting hyperparameters
-        using TimeSeriesSplit.
-        """
-        print("Doing hyperparameter tunning...")
+    def tune_hyperparameters(self, n_iter: int = 30, cv_splits: int = 5):
         param_dist = {
-                # More & larger trees
-                'n_estimators':    [100, 200, 500, 1000, 1500, 2000],
-
-                # Slower learning rates to allow more trees to fit subtleties
-                'learning_rate':   [0.005, 0.01, 0.05, 0.1, 0.2],
-
-                # Deeper trees
-                'max_depth':       [3, 5, 7, 9, 11, 13],
-
-                # Allow smaller subsamples (more variance) as well as full-sample
-                'subsample':       [0.5, 0.6, 0.8, 1.0],
-
-                # Permit very small leaf and split sizes
-                'min_samples_split': [2, 5, 10, 20],
-                'min_samples_leaf':  [1, 2, 4, 10],
-
-                # Try using all features or standard heuristics
-                'max_features':    ['sqrt', 'log2', 0.3, 0.5, 1.0],
-
-                # Different loss functions—“huber” can be more robust to outliers
-                'loss':   ['quantile', 'squared_error', 'absolute_error', 'huber'],
-
-                # Control number of leaf nodes to let trees grow larger
-                'max_leaf_nodes':  [None, 10, 20, 30, 50]
-            }
-
-        gb = GradientBoostingRegressor(random_state=self.random_state)
-        tscv = TimeSeriesSplit(n_splits=cv_splits)
+            'n_estimators': [100, 200, 500, 1000],
+            'learning_rate': [0.005, 0.01, 0.05, 0.1],
+            'max_depth': [3, 5, 7, 9, 11],
+            'subsample': [0.5, 0.7, 1.0],
+            'colsample_bytree': [0.3, 0.5, 0.7, 1.0],
+            'min_child_weight': [1, 2, 5, 10],
+            'gamma': [0, 0.1, 0.3, 0.5]
+        }
+        model = xgb.XGBRegressor(random_state=self.random_state, tree_method='hist')
+        kf = KFold(n_splits=cv_splits, shuffle=True, random_state=self.random_state)
 
         search = RandomizedSearchCV(
-            estimator=gb,
+            estimator=model,
             param_distributions=param_dist,
             n_iter=n_iter,
             scoring='neg_mean_absolute_error',
-            cv=tscv,
+            cv=kf,
             random_state=self.random_state,
             n_jobs=-1,
             verbose=1
         )
-        # log-transform target for search stability
         search.fit(self.X_train, np.log1p(self.y_train))
         self.best_params = search.best_params_
         print("Best hyperparameters:", self.best_params)
 
-    def train_model(self,
-                    log_transform: bool = False,
-                    feature_select: bool = False):
-        """
-        Build a pipeline with scaling, optional feature selection,
-        and a GradientBoostingRegressor.
-        """
-
-        print("Train model...")
+    def train_model(self, log_transform: bool = False):
         if self.X_train is None or self.y_train is None:
             raise ValueError("Call preprocess() before train_model().")
 
-        # use tuned params or sensible defaults
-        model_params = self.best_params or {
-            'n_estimators': 100,
-            'learning_rate': 0.1,
-            'random_state': self.random_state
-        }
-        gb = GradientBoostingRegressor(**model_params)
+        model_params = self.best_params or {'n_estimators': 100, 'learning_rate': 0.1, 'random_state': self.random_state}
+        model = xgb.XGBRegressor(**model_params)
 
-        steps = [
-            ('scaler', StandardScaler())
-        ]
-        if feature_select:
-            steps.append(
-                ('feature_select', SelectFromModel(gb, threshold='median'))
-            )
-        steps.append(('model', gb))
+        steps = [('scaler', StandardScaler())]
+        steps.append(('model', model))
 
         self.pipeline = Pipeline(steps)
         y = np.log1p(self.y_train) if log_transform else self.y_train
@@ -268,12 +217,6 @@ class BoostingEmissionsPredictionPipeline:
         self._log_transform = log_transform
 
     def evaluate_model(self):
-        """
-        Predict on test set, compute MAE, RMSE, R^2,
-        and plot residuals.
-        """
-
-        print("Evaluating model...")
         if self.pipeline is None:
             raise ValueError("Train the model before evaluation.")
 
@@ -289,7 +232,6 @@ class BoostingEmissionsPredictionPipeline:
         print(f"RMSE: {rmse:.4f}")
         print(f"R²:   {r2:.4f}")
 
-        # Residual plot
         residuals = self.y_test - y_pred
         plt.figure(figsize=(8,5))
         plt.scatter(y_pred, residuals, alpha=0.6)
@@ -299,30 +241,44 @@ class BoostingEmissionsPredictionPipeline:
         plt.title('Residuals vs. Predicted')
         plt.show()
 
-        plt.figure(figsize=(8, 5))
-
-        # Scatter: Predicted on X, Actual on Y
+        plt.figure(figsize=(8,5))
         plt.scatter(y_pred, self.y_test, alpha=0.6)
-
-        # Identity line over the combined range
         min_val = min(y_pred.min(), self.y_test.min())
         max_val = max(y_pred.max(), self.y_test.max())
-        plt.plot([min_val, max_val],
-                [min_val, max_val],
-                'k--',
-                linewidth=2)
-
+        plt.plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=2)
         plt.xlabel('Predicted Emissions')
         plt.ylabel('Actual Emissions')
         plt.title('Predicted vs. Actual Emissions')
         plt.tight_layout()
         plt.show()
 
+        explainer = shap.Explainer(self.pipeline.named_steps['model'], self.X_test)
+        shap_values = explainer(self.X_test)
+        shap.summary_plot(shap_values, self.X_test, show=True)
+
+    def cross_validate_model(self, cv_splits: int = 5):
+        if self.pipeline is None:
+            raise ValueError("Model not trained.")
+
+        scoring = {'MAE': 'neg_mean_absolute_error', 'R2': 'r2', 'RMSE': 'neg_root_mean_squared_error'}
+        kf = KFold(n_splits=cv_splits, shuffle=True, random_state=self.random_state)
+        results = cross_validate(
+            self.pipeline,
+            self.X_train,
+            np.log1p(self.y_train) if self._log_transform else self.y_train,
+            cv=kf,
+            scoring=scoring,
+            n_jobs=-1,
+            return_train_score=False
+        )
+
+        print("\nCross-Validation Results:")
+        for metric, scores in results.items():
+            if 'test' in metric:
+                mean_score = np.mean(-scores) if 'neg' in metric else np.mean(scores)
+                print(f"{metric}: Mean={mean_score:.4f}, Std={np.std(scores):.4f}")
 
     def plot_feature_importances(self, top_n: int = 10):
-        """
-        Bar plot of the top_n feature importances.
-        """
         model = self.pipeline.named_steps['model']
         if not hasattr(model, 'feature_importances_'):
             raise ValueError("Model has no feature_importances_ attribute.")
@@ -337,20 +293,15 @@ class BoostingEmissionsPredictionPipeline:
         plt.title(f'Top {top_n} Feature Importances')
         plt.show()
 
-    def run(self,
-            tune: bool = True,
-            log_transform: bool = False,
-            feature_select: bool = False):
-        """
-        Full workflow: preprocess → (tune) → train → evaluate → plot importances
-        """
+    def run(self, tune: bool = True, log_transform: bool = False):
         self.preprocess()
         if tune:
             self.tune_hyperparameters()
-        self.train_model(log_transform=log_transform,
-                         feature_select=feature_select)
+        self.train_model(log_transform=log_transform)
         self.evaluate_model()
+        self.cross_validate_model()
         self.plot_feature_importances()
+
 
 
 from sklearn.neural_network import MLPRegressor
