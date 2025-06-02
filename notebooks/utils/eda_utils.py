@@ -6,7 +6,6 @@ from sklearn.mixture import GaussianMixture
 from sklearn.feature_selection import VarianceThreshold
 from scipy.stats import zscore
 
-
 class EDAUtils:
 
     @staticmethod
@@ -78,7 +77,7 @@ class EDAUtils:
         plt.xlabel("Cluster Name")
         plt.ylabel("Count")
         plt.show()
-    
+
     @staticmethod
     def plot_all_histograms(df, bins=30, max_cols=4, figsize_per_plot=(4,3)):
         n_features = len(df.columns)
@@ -120,7 +119,32 @@ class EDAUtils:
     def find_outlier_columns(df, z_thresh=3.0):
         zs = df.apply(zscore).abs()
         outlier_pct = (zs > z_thresh).sum() / len(df) * 100
+        return outlier_pct[outlier_pct>0].to_dict()
+    
+    @staticmethod
+    def get_target_var_corr(df, target_var, threshold=0.1):
+        corr = df.corr()[target_var].abs()
+        return corr[corr > threshold].sort_values(ascending=False).to_dict()
+    
+    @staticmethod
+    def check_for_multicollinearity(df, threshold=0.8):
+        corr_matrix = df.corr().abs()
+        to_drop = set()
+        for i in range(len(corr_matrix.columns)):
+            for j in range(i):
+                if corr_matrix.iloc[i, j] >= threshold:
+                    colname = corr_matrix.columns[i]
+                    to_drop.add(colname)
+        print(f"Columns to drop due to multicollinearity (threshold={threshold}): {to_drop}")
+        return list(to_drop)
 
-# class DataCleaningUtils:
+
+class DataCleaningUtils:
+
+    @staticmethod
+    def remove_outliers(df, z_thresh=3.0):
+        zs = df.apply(zscore).abs()
+        outlier_mask = (zs > z_thresh).any(axis=1)
+        return df[~outlier_mask]
 
     
