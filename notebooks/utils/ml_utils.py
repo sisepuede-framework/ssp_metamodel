@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import shap
 
 from sklearn.model_selection import train_test_split, RandomizedSearchCV, TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
@@ -10,7 +11,20 @@ from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.neural_network import MLPRegressor
 from sklearn.feature_selection import SelectFromModel
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.decomposition import PCA
+from sklearn.model_selection import cross_validate
 
+
+class PreprocessingUtils:
+
+    @staticmethod
+    def pca_reduce(df, var_threshold=0.95):
+        pca = PCA(n_components=var_threshold)
+        Xp = pca.fit_transform(df)
+        return pd.DataFrame(Xp,
+                            columns=[f"PC{i+1}" for i in range(Xp.shape[1])],
+                            index=df.index), pca
+    
 
 class RFEmissionsPredictionPipeline:
     def __init__(self, df, target: str = 'total_emissions_last_five_years', test_size: float = 0.2, random_state: int = 42):
@@ -33,9 +47,6 @@ class RFEmissionsPredictionPipeline:
         )
 
     def tune_hyperparameters(self, n_iter: int = 30, cv_splits: int = 5):
-        """
-        Performs RandomizedSearchCV on a RandomForest to find best hyperparameters.
-        """
         param_dist = {
             'n_estimators': [200, 500, 1000, 3000],
             'max_depth': [None, 10, 20, 30],
@@ -54,16 +65,12 @@ class RFEmissionsPredictionPipeline:
         self.best_params = search.best_params_
         print("Best hyperparameters:", self.best_params)
 
-    def train_model(self, log_transform: bool = False, feature_select: bool = False):
+    def train_model(self, log_transform: bool = False):
         if self.X_train is None or self.y_train is None:
             raise ValueError("Data not preprocessed. Call preprocess() first.")
-        # Use tuned params or defaults
         model_params = self.best_params or {'n_estimators': 100, 'random_state': self.random_state}
         rf = RandomForestRegressor(**model_params)
-        steps = [('scaler', StandardScaler())]
-        if feature_select:
-            steps.append(('feature_select', SelectFromModel(rf, threshold='median')))
-        steps.append(('model', rf))
+        steps = [('scaler', StandardScaler()), ('model', rf)]
         self.pipeline = Pipeline(steps)
         y = np.log1p(self.y_train) if log_transform else self.y_train
         self.pipeline.fit(self.X_train, y)
@@ -78,6 +85,7 @@ class RFEmissionsPredictionPipeline:
         print("MAE:", mean_absolute_error(self.y_test, y_pred))
         print("RMSE:", np.sqrt(mean_squared_error(self.y_test, y_pred)))
         print("R^2 Score:", r2_score(self.y_test, y_pred))
+
         # Residual plot
         res = self.y_test - y_pred
         plt.figure(figsize=(8,5))
@@ -88,25 +96,36 @@ class RFEmissionsPredictionPipeline:
         plt.title('Residuals vs Predicted')
         plt.show()
 
+        # Scatter plot
         plt.figure(figsize=(8, 5))
-
-        # Scatter: Predicted on X, Actual on Y
         plt.scatter(y_pred, self.y_test, alpha=0.6)
-
-        # Identity line over the combined range
         min_val = min(y_pred.min(), self.y_test.min())
         max_val = max(y_pred.max(), self.y_test.max())
-        plt.plot([min_val, max_val],
-                [min_val, max_val],
-                'k--',
-                linewidth=2)
-
+        plt.plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=2)
         plt.xlabel('Predicted Emissions')
         plt.ylabel('Actual Emissions')
         plt.title('Predicted vs. Actual Emissions')
         plt.tight_layout()
         plt.show()
 
+        # SHAP summary plot
+        explainer = shap.Explainer(self.pipeline.named_steps['model'], self.X_test)
+        shap_values = explainer(self.X_test)
+        shap.summary_plot(shap_values, self.X_test, show=True)
+
+    def cross_validate_model(self, cv_splits: int = 5):
+        if self.pipeline is None:
+            raise ValueError("Model not trained.")
+        scoring = {'MAE': 'neg_mean_absolute_error', 'R2': 'r2', 'RMSE': 'neg_root_mean_squared_error'}
+        results = cross_validate(
+            self.pipeline, self.X_train, np.log1p(self.y_train) if self._log_transform else self.y_train,
+            cv=TimeSeriesSplit(n_splits=cv_splits), scoring=scoring, n_jobs=-1, return_train_score=False
+        )
+        print("\nCross-Validation Results:")
+        for metric, scores in results.items():
+            if 'test' in metric:
+                mean_score = np.mean(-scores) if 'neg' in metric else np.mean(scores)
+                print(f"{metric}: Mean={mean_score:.4f}, Std={np.std(scores):.4f}")
 
     def plot_feature_importances(self, top_n: int = 10):
         if not hasattr(self.pipeline.named_steps['model'], 'feature_importances_'):
@@ -120,16 +139,14 @@ class RFEmissionsPredictionPipeline:
         plt.title(f'Top {top_n} Feature Importances')
         plt.show()
 
-    def run(self, tune: bool = True, log_transform: bool = False, feature_select: bool = False):
-        # self.load_data()
+    def run(self, tune: bool = True, log_transform: bool = False):
         self.preprocess()
         if tune:
             self.tune_hyperparameters()
-        self.train_model(log_transform=log_transform, feature_select=feature_select)
+        self.train_model(log_transform=log_transform)
         self.evaluate_model()
+        self.cross_validate_model()
         self.plot_feature_importances()
-
-
 
 
 class BoostingEmissionsPredictionPipeline:
