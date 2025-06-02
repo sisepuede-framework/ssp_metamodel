@@ -3,3 +3,4 @@ notebook
 seaborn
 matplotlib
 scikit-learn
+shap
