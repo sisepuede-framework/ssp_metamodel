@@ -16,6 +16,28 @@ class EDAUtils:
         plt.xlabel("Total Emissions")
         plt.ylabel("Frequency")
         plt.show()
+    
+    @staticmethod
+    def plot_multiple_histograms(df, columns=None, bins=30, kde=True, title="Histograms of Selected Columns"):
+        if columns is None:
+            columns = df.columns
+        n_cols = len(columns)
+        n_rows = (n_cols + 1) // 2
+        fig, axes = plt.subplots(n_rows, 2, figsize=(12, n_rows * 4))
+        axes = axes.flatten()
+        
+        for i, col in enumerate(columns):
+            sns.histplot(df[col], bins=bins, kde=kde, ax=axes[i])
+            axes[i].set_title(f"Histogram of {col}")
+            axes[i].set_xlabel(col)
+            axes[i].set_ylabel("Frequency")
+        
+        for j in range(i + 1, len(axes)):
+            axes[j].axis('off')
+        
+        plt.tight_layout()
+        plt.suptitle(title, y=1.02)
+        plt.show()
 
     @staticmethod
     def log_transform_comparison_plot(df, column="total_emissions_last_five_years"):
@@ -122,10 +144,20 @@ class EDAUtils:
         return outlier_pct[outlier_pct>0].to_dict()
     
     @staticmethod
-    def get_target_var_corr(df, target_var, threshold=0.1):
+    def get_target_var_corr(df, target_var, threshold=0.1, return_dict=False):
         corr = df.corr()[target_var].abs()
-        return corr[corr > threshold].sort_values(ascending=False).to_dict()
-    
+        corr_dict = corr[corr > threshold].sort_values(ascending=False).to_dict()
+        print("\n" + "="*50)
+        print(f"Correlation with target variable '{target_var}' (threshold: {threshold}):")
+        print("-"*50)
+        for col, value in corr_dict.items():
+            print(f"{col:<30} : {value:.4f}")
+        print("="*50 + "\n")
+
+        if return_dict:
+            return corr_dict
+        else:
+            return None
     @staticmethod
     def check_for_multicollinearity(df, threshold=0.8):
         corr_matrix = df.corr().abs()
